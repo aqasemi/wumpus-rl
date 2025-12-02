@@ -1,1 +1,0 @@
-rm -rf models logs output.txt tests
