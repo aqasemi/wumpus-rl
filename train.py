@@ -10,12 +10,12 @@ ACTION_NAMES = ['Up', 'Down', 'Left', 'Right', 'Grab', 'Climb']
 
 def evaluate(model, difficulty, n=30):
     """Evaluate model win rate on given difficulty."""
-    env = DummyVecEnv([lambda d=difficulty: WumpusWorldEnv(difficulty=d, max_steps=24)])
+    env = DummyVecEnv([lambda d=difficulty: WumpusWorldEnv(difficulty=d, max_steps=40)])
     wins = 0
     for _ in range(n):
         obs = env.reset()
         done = False
-        for _ in range(24):
+        for _ in range(40):
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = env.step(action)
             if done:
@@ -43,7 +43,7 @@ def train_curriculum(save_path='models/ppo_wumpus'):
     os.makedirs('models', exist_ok=True)
     
     # Initialize on easiest level
-    env = DummyVecEnv([lambda: WumpusWorldEnv(difficulty=0, max_steps=24)])
+    env = DummyVecEnv([lambda: WumpusWorldEnv(difficulty=0, max_steps=40)])
     model = PPO(
         'MlpPolicy', env,
         learning_rate=3e-4,
@@ -56,16 +56,16 @@ def train_curriculum(save_path='models/ppo_wumpus'):
     )
     
     stages = [
-        (0, 5000, "Fixed gold"),
-        (1, 20000, "Random gold"),
-        (2, 30000, "+ Wumpus"),
-        (3, 50000, "+ Pits (full game)"),
+        (0, 10000, "Fixed gold (must explore)"),
+        (1, 50000, "Random gold (must explore)"),
+        (2, 80000, "+ Wumpus"),
+        (3, 100000, "+ Pits (full game)"),
     ]
     
     for diff, steps, desc in stages:
         print(f"\nStage {diff + 1}: {desc} ({steps:,} steps)")
         
-        env = DummyVecEnv([lambda d=diff: WumpusWorldEnv(difficulty=d, max_steps=24)])
+        env = DummyVecEnv([lambda d=diff: WumpusWorldEnv(difficulty=d, max_steps=40)])
         model.set_env(env)
         model.learn(steps, progress_bar=True)
         
@@ -93,7 +93,7 @@ def quick_train(difficulty=0, timesteps=10000):
     """Quick training on single difficulty."""
     print(f"\nTraining on difficulty {difficulty} for {timesteps:,} steps")
     
-    env = DummyVecEnv([lambda d=difficulty: WumpusWorldEnv(difficulty=d, max_steps=24)])
+    env = DummyVecEnv([lambda d=difficulty: WumpusWorldEnv(difficulty=d, max_steps=40)])
     model = PPO('MlpPolicy', env, verbose=0, ent_coef=0.02)
     model.learn(timesteps, progress_bar=True)
     
@@ -109,7 +109,7 @@ def watch_agent(model_path='models/ppo_wumpus', difficulty=1, n_episodes=3):
     model = PPO.load(model_path)
     
     for ep in range(n_episodes):
-        env = WumpusWorldEnv(difficulty=difficulty, render_mode='ansi', max_steps=24)
+        env = WumpusWorldEnv(difficulty=difficulty, render_mode='ansi', max_steps=40)
         obs, _ = env.reset()
         
         print(f"\n{'='*40}")
@@ -151,7 +151,7 @@ def record_gif(model_path='models/ppo_wumpus', difficulty=1, save_path='recordin
     paths = []
     
     for ep in range(n_episodes):
-        env = WumpusWorldEnv(difficulty=difficulty, render_mode='rgb_array', max_steps=24)
+        env = WumpusWorldEnv(difficulty=difficulty, render_mode='rgb_array', max_steps=40)
         obs, _ = env.reset()
         
         frames = [env.render()]
@@ -185,11 +185,19 @@ def test_env():
     env = WumpusWorldEnv(difficulty=0, render_mode='ansi')
     obs, _ = env.reset()
     print(f"Obs shape: {obs.shape}")
-    print(f"Obs: {obs}")
+    print("Observation breakdown:")
+    print(f"  [0-1]   Position:  row={obs[0]:.2f}, col={obs[1]:.2f}")
+    print(f"  [2]     has_gold:  {obs[2]:.0f}")
+    print(f"  [3]     glitter:   {obs[3]:.0f}  <- Only way to find gold!")
+    print(f"  [4]     can_win:   {obs[4]:.0f}")
+    print(f"  [5-8]   Dangers:   up={obs[5]:.0f} down={obs[6]:.0f} left={obs[7]:.0f} right={obs[8]:.0f}")
+    print(f"  [9-12]  Walls:     up={obs[9]:.0f} down={obs[10]:.0f} left={obs[11]:.0f} right={obs[12]:.0f}")
+    print(f"  [13-16] Unvisited: up={obs[13]:.0f} down={obs[14]:.0f} left={obs[15]:.0f} right={obs[16]:.0f}")
+    print(f"\nNote: Agent does NOT know gold location - must explore!")
     env.render()
     
-    # Optimal: Right -> Grab -> Left -> Climb
-    actions = [3, 4, 2, 5]
+    # Difficulty 0: Gold is at [3,1], so Right -> see glitter -> Grab -> Left -> Climb
+    actions = [3, 4, 2, 5]  # Right, Grab, Left, Climb
     
     total_reward = 0
     for a in actions:
@@ -197,6 +205,8 @@ def test_env():
         obs, reward, term, trunc, info = env.step(a)
         total_reward += reward
         print(f"Reward: {reward:.1f} | Total: {total_reward:.1f}")
+        if obs[3] == 1:
+            print("*** GLITTER! Gold is here! ***")
         env.render()
         if term or trunc:
             print(f"Episode ended. Win: {info.get('win')}")

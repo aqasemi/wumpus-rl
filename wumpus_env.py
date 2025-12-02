@@ -18,32 +18,33 @@ class WumpusWorldEnv(gym.Env):
     """
     metadata = {'render_modes': ['human', 'rgb_array', 'ansi'], 'render_fps': 4}
 
-    # Actions
+    # Actions (simplified - no Grab needed, auto-pickup)
     UP = 0
     DOWN = 1
     LEFT = 2
     RIGHT = 3
-    GRAB = 4
-    CLIMB = 5
+    CLIMB = 4
     
     # Direction vectors for movement
     DIR_VECTORS = {0: (-1, 0), 1: (1, 0), 2: (0, -1), 3: (0, 1)}
-    ACTION_NAMES = ['Up', 'Down', 'Left', 'Right', 'Grab', 'Climb']
+    ACTION_NAMES = ['Up', 'Down', 'Left', 'Right', 'Climb']
 
-    def __init__(self, render_mode=None, difficulty=0, max_steps=24):
+    def __init__(self, render_mode=None, difficulty=0, max_steps=40):
         super().__init__()
         self.grid_size = 4
         self.render_mode = render_mode
         self.difficulty = difficulty
         self.max_steps = max_steps
         
-        self.action_space = spaces.Discrete(6)
+        self.action_space = spaces.Discrete(5)  # Up, Down, Left, Right, Climb
         
-        # Observation: 11 floats with directional danger info
-        # [row, col, has_gold, glitter, can_win, gold_row, gold_col, 
-        #  danger_up, danger_down, danger_left, danger_right]
+        # Observation: 18 floats - NO gold location (must explore!)
+        # [row, col, has_gold, glitter, glitter_adjacent, can_win,
+        #  danger_up, danger_down, danger_left, danger_right,
+        #  wall_up, wall_down, wall_left, wall_right,
+        #  unvisited_up, unvisited_down, unvisited_left, unvisited_right]
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(11,), dtype=np.float32
+            low=0, high=1, shape=(18,), dtype=np.float32
         )
         
         self._reset_state()
@@ -59,6 +60,7 @@ class WumpusWorldEnv(gym.Env):
         self.game_over = False
         self.win = False
         self.current_step = 0
+        self.visited = {(3, 0)}  # Track visited cells for exploration bonus
 
     def _adjacent(self, r, c):
         adj = []
@@ -120,7 +122,6 @@ class WumpusWorldEnv(gym.Env):
         r, c = self.agent_pos
         
         # Check for danger in each direction
-        # Direction vectors: UP=(-1,0), DOWN=(1,0), LEFT=(0,-1), RIGHT=(0,1)
         def is_danger(nr, nc):
             if not (0 <= nr < 4 and 0 <= nc < 4):
                 return 0  # Wall, not danger
@@ -135,8 +136,33 @@ class WumpusWorldEnv(gym.Env):
         danger_left = is_danger(r, c - 1)
         danger_right = is_danger(r, c + 1)
         
-        # Glitter = gold here
-        glitter = 1 if (self.gold_pos and [r, c] == self.gold_pos and not self.has_gold) else 0
+        # Wall detection (boundaries)
+        wall_up = 1 if r == 0 else 0
+        wall_down = 1 if r == 3 else 0
+        wall_left = 1 if c == 0 else 0
+        wall_right = 1 if c == 3 else 0
+        
+        # Unvisited cell detection - helps agent explore systematically
+        def is_unvisited(nr, nc):
+            if not (0 <= nr < 4 and 0 <= nc < 4):
+                return 0  # Wall
+            return 0 if (nr, nc) in self.visited else 1
+        
+        unvisited_up = is_unvisited(r - 1, c)
+        unvisited_down = is_unvisited(r + 1, c)
+        unvisited_left = is_unvisited(r, c - 1)
+        unvisited_right = is_unvisited(r, c + 1)
+        
+        # Glitter = gold is HERE
+        glitter = 1 if (self.gold_pos and [r, c] == self.gold_pos) else 0
+        
+        # Glitter adjacent = gold is in an adjacent cell (hint!)
+        glitter_adjacent = 0
+        if self.gold_pos and not self.has_gold:
+            for ar, ac in self._adjacent(r, c):
+                if [ar, ac] == self.gold_pos:
+                    glitter_adjacent = 1
+                    break
         
         # Can win = at start with gold
         at_start = (r == 3 and c == 0)
@@ -147,13 +173,20 @@ class WumpusWorldEnv(gym.Env):
             c / 3.0,
             1.0 if self.has_gold else 0.0,
             float(glitter),
+            float(glitter_adjacent),
             float(can_win),
-            self.gold_pos[0] / 3.0 if self.gold_pos else r / 3.0,  # Gold row (or agent if picked)
-            self.gold_pos[1] / 3.0 if self.gold_pos else c / 3.0,  # Gold col
             float(danger_up),
             float(danger_down),
             float(danger_left),
             float(danger_right),
+            float(wall_up),
+            float(wall_down),
+            float(wall_left),
+            float(wall_right),
+            float(unvisited_up),
+            float(unvisited_down),
+            float(unvisited_left),
+            float(unvisited_right),
         ], dtype=np.float32)
         
         return obs
@@ -183,23 +216,24 @@ class WumpusWorldEnv(gym.Env):
                     terminated = True
                     self.game_over = True
                 else:
-                    # Distance shaping
-                    if self.gold_pos and not self.has_gold:
-                        old_dist = abs(r - self.gold_pos[0]) + abs(c - self.gold_pos[1])
-                        new_dist = abs(nr - self.gold_pos[0]) + abs(nc - self.gold_pos[1])
-                        reward += (old_dist - new_dist) * 2
-                    elif self.has_gold:
+                    # Exploration bonus - reward visiting new cells
+                    if (nr, nc) not in self.visited:
+                        self.visited.add((nr, nc))
+                        reward += 5  # Exploration bonus
+                    
+                    # Auto-pickup gold when stepping on it
+                    if self.gold_pos and [nr, nc] == self.gold_pos and not self.has_gold:
+                        self.has_gold = True
+                        self.gold_pos = None
+                        reward += 50  # Found the gold!
+                    
+                    # When holding gold, guide toward start
+                    if self.has_gold:
                         old_dist = abs(r - 3) + abs(c - 0)
                         new_dist = abs(nr - 3) + abs(nc - 0)
                         reward += (old_dist - new_dist) * 5
             else:
-                reward -= 2  # Bump
-        
-        elif action == self.GRAB:
-            if self.gold_pos and self.agent_pos == self.gold_pos and not self.has_gold:
-                self.has_gold = True
-                self.gold_pos = None
-                reward = 20
+                reward -= 2  # Bump into wall
         
         elif action == self.CLIMB:
             if self.agent_pos == [3, 0]:
