@@ -1,103 +1,160 @@
-import gymnasium as gym
-import wumpus_env
-import numpy as np
 import time
-from dqn_agent import DQNAgent
+import sys
+from wumpus_env import WumpusWorldEnv
 
-def train():
-    env = wumpus_env.WumpusWorldEnv()
 
-    # State shape is (4, 5, 5)
-    state_shape = env.observation_space.shape
-    action_dim = env.action_space.n
-
-    agent = DQNAgent(state_shape, action_dim, lr=0.001, epsilon_decay=0.995)
-
-    num_episodes = 1000
-    target_update_freq = 10
-
-    print("Starting Training...")
-
-    for episode in range(num_episodes):
-        state, _ = env.reset()
-        total_reward = 0
-        done = False
-        truncated = False
-
-        while not (done or truncated):
-            action = agent.select_action(state)
-            next_state, reward, done, truncated, _ = env.step(action)
-
-            agent.store_transition(state, action, reward, next_state, done)
-            agent.update()
-
-            state = next_state
-            total_reward += reward
-
-        agent.decay_epsilon()
-
-        if episode % target_update_freq == 0:
-            agent.update_target_network()
-
-        if episode % 10 == 0:
-            print(f"Episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon:.2f}")
-
-    print("Training Complete.")
-    agent.save("wumpus_dqn.pth")
-    return agent
-
-def visualize(agent=None):
-    if agent is None:
-        env = wumpus_env.WumpusWorldEnv()
-        state_shape = env.observation_space.shape
-        action_dim = env.action_space.n
-        agent = DQNAgent(state_shape, action_dim)
-        try:
-            agent.load("wumpus_dqn.pth")
-            print("Loaded model.")
-        except:
-            print("No model found, using random agent.")
-
-    env = wumpus_env.WumpusWorldEnv(render_mode='ansi')
-    state, _ = env.reset()
-    env.render()
-
-    done = False
-    truncated = False
+def play_interactive():
+    """Play the game interactively using keyboard."""
+    print("\n" + "=" * 50)
+    print("  WUMPUS WORLD - Interactive Mode")
+    print("=" * 50)
+    print("\nControls:")
+    print("  W / ↑  : Move Up")
+    print("  S / ↓  : Move Down")
+    print("  A / ←  : Move Left")
+    print("  D / →  : Move Right")
+    print("  Q      : Quit")
+    print("\nGoal: Find the gold (G) and avoid pits (P) and Wumpus (W)!")
+    print("=" * 50 + "\n")
+    
+    env = WumpusWorldEnv(render_mode='human')
+    obs, _ = env.reset()
+    
     total_reward = 0
+    done = False
+    
+    action_map = {
+        'w': 0, 'up': 0,      # Up
+        's': 1, 'down': 1,    # Down
+        'a': 2, 'left': 2,    # Left
+        'd': 3, 'right': 3    # Right
+    }
+    
+    import pygame
+    
+    while not done:
+        # Handle pygame events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                env.close()
+                return
+            elif event.type == pygame.KEYDOWN:
+                action = None
+                
+                if event.key in [pygame.K_w, pygame.K_UP]:
+                    action = 0
+                elif event.key in [pygame.K_s, pygame.K_DOWN]:
+                    action = 1
+                elif event.key in [pygame.K_a, pygame.K_LEFT]:
+                    action = 2
+                elif event.key in [pygame.K_d, pygame.K_RIGHT]:
+                    action = 3
+                elif event.key == pygame.K_q:
+                    env.close()
+                    return
+                
+                if action is not None:
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    total_reward += reward
+                    done = terminated or truncated
+                    
+                    if done:
+                        if info.get('win'):
+                            print("\n🎉 VICTORY! You found the gold!")
+                        else:
+                            print("\n💀 GAME OVER!")
+                        print(f"Total Reward: {total_reward}")
+        
+        time.sleep(0.05)  # Small delay to prevent CPU spinning
+    
+    # Wait for user to close
+    print("\nPress Q or close window to exit...")
+    waiting = True
+    while waiting:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_q):
+                waiting = False
+        time.sleep(0.05)
+    
+    env.close()
+
+
+def play_random():
+    """Watch a random agent play."""
+    print("\nWatching random agent play...")
+    
+    env = WumpusWorldEnv(render_mode='human')
+    obs, _ = env.reset()
+    
+    total_reward = 0
+    done = False
     step = 0
-
-    # Turn off exploration
-    agent.epsilon = 0.0
-
-    print("\nVisualizing...")
-    while not (done or truncated):
-        # time.sleep(0.5) # Removed for batch run
-        action = agent.select_action(state)
-
-        action_name = ["Up", "Down", "Left", "Right"][action]
-        print(f"Step {step}: Action {action_name}")
-
-        state, reward, done, truncated, _ = env.step(action)
-        env.render()
+    
+    while not done and step < 100:
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
+        done = terminated or truncated
         step += 1
+        time.sleep(0.3)
+    
+    print(f"\nGame ended after {step} steps")
+    print(f"Total Reward: {total_reward}")
+    print(f"Result: {'WIN!' if info.get('win') else 'Lost'}")
+    
+    time.sleep(2)
+    env.close()
 
-        if done:
-            if reward <= -1000:
-                print("Game Over: Died!")
-            elif reward >= 100:
-                 pass
 
-    if truncated:
-        print("Game Over: Max steps reached.")
+def test_env():
+    """Quick test of the environment."""
+    print("\nTesting environment...")
+    
+    env = WumpusWorldEnv(render_mode='ansi')
+    
+    print("\nInitial state:")
+    obs, _ = env.reset()
+    env.render()
+    
+    print(f"\nObservation shape: {obs.shape}")
+    print(f"Action space: {env.action_space}")
+    
+    # Take a few random steps
+    print("\nTaking 5 random steps:")
+    for i in range(5):
+        action = env.action_space.sample()
+        action_name = env.action_names[action]
+        obs, reward, terminated, truncated, info = env.step(action)
+        print(f"\nStep {i+1}: Action = {action_name}, Reward = {reward}")
+        env.render()
+        
+        if terminated or truncated:
+            print(f"Episode ended: {'Win!' if info.get('win') else 'Lost'}")
+            break
+    
+    env.close()
+    print("\nEnvironment test complete!")
 
-    print(f"Final Score: {total_reward}")
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "play":
-        visualize()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "play":
+            play_interactive()
+        elif sys.argv[1] == "random":
+            play_random()
+        elif sys.argv[1] == "test":
+            test_env()
+        else:
+            print(f"Unknown command: {sys.argv[1]}")
+            print("Usage: python main.py [play|random|test]")
     else:
-        trained_agent = train()
-        visualize(trained_agent)
+        print("Wumpus World")
+        print("=" * 40)
+        print("\nCommands:")
+        print("  python main.py play   - Play interactively")
+        print("  python main.py random - Watch random agent")
+        print("  python main.py test   - Test environment")
+        print("\nFor training:")
+        print("  python train.py       - Train PPO agent")
+        print("  python train.py play  - Watch trained agent")
+        print("  python train.py demo  - Random agent demo")
