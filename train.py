@@ -138,8 +138,8 @@ def watch_agent(model_path='models/ppo_wumpus', difficulty=1, n_episodes=3):
         env.close()
 
 
-def record_gif(model_path='models/ppo_wumpus', difficulty=1, save_path='recordings'):
-    """Record episode as GIF."""
+def record_gif(model_path='models/ppo_wumpus', difficulty=1, save_path='recordings', n_episodes=10):
+    """Record multiple episodes as GIFs."""
     import matplotlib
     matplotlib.use('Agg')
     from PIL import Image
@@ -147,29 +147,37 @@ def record_gif(model_path='models/ppo_wumpus', difficulty=1, save_path='recordin
     os.makedirs(save_path, exist_ok=True)
     model = PPO.load(model_path)
     
-    env = WumpusWorldEnv(difficulty=difficulty, render_mode='rgb_array', max_steps=24)
-    obs, _ = env.reset()
+    wins = 0
+    paths = []
     
-    frames = [env.render()]
-    done = False
+    for ep in range(n_episodes):
+        env = WumpusWorldEnv(difficulty=difficulty, render_mode='rgb_array', max_steps=24)
+        obs, _ = env.reset()
+        
+        frames = [env.render()]
+        done = False
+        
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            action = int(action)
+            obs, reward, term, trunc, info = env.step(action)
+            frames.append(env.render())
+            done = term or trunc
+        
+        # Save GIF
+        images = [Image.fromarray(f) for f in frames]
+        result = "win" if info.get('win') else "loss"
+        if info.get('win'):
+            wins += 1
+        gif_path = f'{save_path}/diff{difficulty}_ep{ep+1:02d}_{result}.gif'
+        images[0].save(gif_path, save_all=True, append_images=images[1:], duration=500, loop=0)
+        
+        print(f"  [{ep+1:2d}/{n_episodes}] {gif_path} | {len(frames):2d} frames")
+        paths.append(gif_path)
+        env.close()
     
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        action = int(action)
-        obs, reward, term, trunc, info = env.step(action)
-        frames.append(env.render())
-        done = term or trunc
-    
-    # Save GIF
-    images = [Image.fromarray(f) for f in frames]
-    gif_path = f'{save_path}/episode_diff{difficulty}.gif'
-    images[0].save(gif_path, save_all=True, append_images=images[1:], duration=500, loop=0)
-    
-    result = "WIN" if info.get('win') else "LOST"
-    print(f"Saved {gif_path} | {result} | {len(frames)} frames")
-    
-    env.close()
-    return gif_path
+    print(f"\nDifficulty {difficulty}: {wins}/{n_episodes} wins ({wins*100//n_episodes}%)")
+    return paths
 
 
 def test_env():
@@ -211,10 +219,12 @@ if __name__ == "__main__":
             watch_agent(difficulty=diff)
         elif cmd == "record":
             diff = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-            record_gif(difficulty=diff)
+            n_eps = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+            record_gif(difficulty=diff, n_episodes=n_eps)
         elif cmd.isdigit():
             quick_train(difficulty=int(cmd), timesteps=10000)
         else:
             print("Usage: python train.py [test|curriculum|watch|record|0|1|2|3]")
+            print("  record <diff> [n]  - Record n episodes (default 10) as GIFs")
     else:
         train_curriculum()

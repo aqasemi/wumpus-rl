@@ -39,10 +39,11 @@ class WumpusWorldEnv(gym.Env):
         
         self.action_space = spaces.Discrete(6)
         
-        # Simple observation: 8 floats
-        # [row, col, has_gold, glitter, can_win, gold_row, gold_col, danger_adjacent]
+        # Observation: 11 floats with directional danger info
+        # [row, col, has_gold, glitter, can_win, gold_row, gold_col, 
+        #  danger_up, danger_down, danger_left, danger_right]
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(8,), dtype=np.float32
+            low=0, high=1, shape=(11,), dtype=np.float32
         )
         
         self._reset_state()
@@ -118,13 +119,21 @@ class WumpusWorldEnv(gym.Env):
     def _obs(self):
         r, c = self.agent_pos
         
-        # Check for adjacent dangers
-        danger = 0
-        for ar, ac in self._adjacent(r, c):
-            if [ar, ac] in self.pits:
-                danger = 1
-            if self.wumpus_pos and [ar, ac] == self.wumpus_pos and self.wumpus_alive:
-                danger = 1
+        # Check for danger in each direction
+        # Direction vectors: UP=(-1,0), DOWN=(1,0), LEFT=(0,-1), RIGHT=(0,1)
+        def is_danger(nr, nc):
+            if not (0 <= nr < 4 and 0 <= nc < 4):
+                return 0  # Wall, not danger
+            if [nr, nc] in self.pits:
+                return 1
+            if self.wumpus_pos and [nr, nc] == self.wumpus_pos and self.wumpus_alive:
+                return 1
+            return 0
+        
+        danger_up = is_danger(r - 1, c)
+        danger_down = is_danger(r + 1, c)
+        danger_left = is_danger(r, c - 1)
+        danger_right = is_danger(r, c + 1)
         
         # Glitter = gold here
         glitter = 1 if (self.gold_pos and [r, c] == self.gold_pos and not self.has_gold) else 0
@@ -141,7 +150,10 @@ class WumpusWorldEnv(gym.Env):
             float(can_win),
             self.gold_pos[0] / 3.0 if self.gold_pos else r / 3.0,  # Gold row (or agent if picked)
             self.gold_pos[1] / 3.0 if self.gold_pos else c / 3.0,  # Gold col
-            float(danger),
+            float(danger_up),
+            float(danger_down),
+            float(danger_left),
+            float(danger_right),
         ], dtype=np.float32)
         
         return obs
