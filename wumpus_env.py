@@ -1,388 +1,296 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import os
 
 
 class WumpusWorldEnv(gym.Env):
     """
-    Wumpus World Environment with visual rendering.
+    Simplified Wumpus World - 4-directional movement.
     
-    A classic AI problem where an agent navigates a cave to find gold
-    while avoiding pits and the deadly Wumpus.
+    Actions: Up, Down, Left, Right, Grab, Climb
+    No turning - agent can move in any direction directly.
+    
+    Difficulty levels:
+    - 0: Gold at [3,1], no hazards
+    - 1: Random gold, no hazards  
+    - 2: Random gold + wumpus
+    - 3: Full game with pits
     """
     metadata = {'render_modes': ['human', 'rgb_array', 'ansi'], 'render_fps': 4}
 
-    def __init__(self, render_mode=None, grid_size=5):
-        super(WumpusWorldEnv, self).__init__()
+    # Actions
+    UP = 0
+    DOWN = 1
+    LEFT = 2
+    RIGHT = 3
+    GRAB = 4
+    CLIMB = 5
+    
+    # Direction vectors for movement
+    DIR_VECTORS = {0: (-1, 0), 1: (1, 0), 2: (0, -1), 3: (0, 1)}
+    ACTION_NAMES = ['Up', 'Down', 'Left', 'Right', 'Grab', 'Climb']
 
-        self.grid_size = grid_size
+    def __init__(self, render_mode=None, difficulty=0, max_steps=24):
+        super().__init__()
+        self.grid_size = 4
         self.render_mode = render_mode
-        self.cell_size = 100  # Pixel size for each cell
+        self.difficulty = difficulty
+        self.max_steps = max_steps
         
-        # Pygame initialization (deferred until first render)
-        self.window = None
-        self.clock = None
-        self.images = None
-
-        # Actions: 0: Up, 1: Down, 2: Left, 3: Right
-        self.action_space = spaces.Discrete(4)
-        self.action_names = ["Up", "Down", "Left", "Right"]
-
-        # Observation: 4 channels x grid_size x grid_size
-        # Channel 0: Player position
-        # Channel 1: Pit positions (observed/known)
-        # Channel 2: Wumpus position (observed/known)
-        # Channel 3: Gold position (observed/known)
+        self.action_space = spaces.Discrete(6)
+        
+        # Simple observation: 8 floats
+        # [row, col, has_gold, glitter, can_win, gold_row, gold_col, danger_adjacent]
         self.observation_space = spaces.Box(
-            low=0, high=1, 
-            shape=(4, self.grid_size, self.grid_size), 
-            dtype=np.float32
+            low=0, high=1, shape=(8,), dtype=np.float32
         )
+        
+        self._reset_state()
 
-        # Game state
-        self.player_pos = []
-        self.wumpus_pos = []
-        self.gold_pos = []
+    def _reset_state(self):
+        self.agent_pos = [3, 0]  # Bottom-left
+        self.wumpus_pos = None
+        self.wumpus_alive = False
+        self.gold_pos = None
         self.pits = []
         self.has_gold = False
+        self.has_arrow = True
         self.game_over = False
         self.win = False
-
-        self.max_steps = 100
         self.current_step = 0
-        
-        # Track visited cells for reward shaping
-        self.visited = set()
 
-    def _load_images(self):
-        """Load images for rendering."""
-        import pygame
-        
-        assets_dir = os.path.join(os.path.dirname(__file__), 'assets')
-        
-        self.images = {}
-        image_files = {
-            'agent': 'agent.png',
-            'wumpus': 'wumpus.png',
-            'gold': 'gold.png',
-            'pit': 'pit.png',
-            'stench': 'stench.png',
-            'breeze': 'breeze.png',
-            'empty': 'empty.jpg'
-        }
-        
-        for name, filename in image_files.items():
-            path = os.path.join(assets_dir, filename)
-            if os.path.exists(path):
-                img = pygame.image.load(path)
-                self.images[name] = pygame.transform.scale(img, (self.cell_size, self.cell_size))
-            else:
-                # Create placeholder surface
-                surf = pygame.Surface((self.cell_size, self.cell_size))
-                surf.fill((100, 100, 100))
-                self.images[name] = surf
-
-    def _get_adjacent_cells(self, row, col):
-        """Get valid adjacent cells."""
-        adjacent = []
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = row + dr, col + dc
-            if 0 <= nr < self.grid_size and 0 <= nc < self.grid_size:
-                adjacent.append((nr, nc))
-        return adjacent
-
-    def _has_stench(self, row, col):
-        """Check if cell has stench (adjacent to Wumpus)."""
-        for w in self.wumpus_pos:
-            if [row, col] in [list(adj) for adj in self._get_adjacent_cells(w[0], w[1])]:
-                return True
-        return False
-
-    def _has_breeze(self, row, col):
-        """Check if cell has breeze (adjacent to pit)."""
-        for p in self.pits:
-            if [row, col] in [list(adj) for adj in self._get_adjacent_cells(p[0], p[1])]:
-                return True
-        return False
+    def _adjacent(self, r, c):
+        adj = []
+        for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
+            nr, nc = r+dr, c+dc
+            if 0 <= nr < 4 and 0 <= nc < 4:
+                adj.append((nr, nc))
+        return adj
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-
-        self.current_step = 0
-        self.has_gold = False
-        self.game_over = False
-        self.win = False
-        self.pits = []
-        self.visited = set()
-
-        # Start at Bottom-Left (Row=grid_size-1, Col=0)
-        self.player_pos = [self.grid_size - 1, 0]
-        self.visited.add(tuple(self.player_pos))
-
-        # Define safe zones (Start + Adjacent)
-        safe_cells = {
-            (self.grid_size - 1, 0), 
-            (self.grid_size - 2, 0), 
-            (self.grid_size - 1, 1)
-        }
-
-        # Place Wumpus (1 or 2)
-        num_wumpus = self.np_random.integers(1, 3)
-        self.wumpus_pos = []
-        for _ in range(num_wumpus):
-            for attempt in range(100):  # Prevent infinite loop
-                r = self.np_random.integers(0, self.grid_size)
-                c = self.np_random.integers(0, self.grid_size)
-                if (r, c) not in safe_cells and [r, c] not in self.wumpus_pos:
-                    self.wumpus_pos.append([r, c])
-                    break
-
-        # Place Gold (1 Gold, not at start)
-        for attempt in range(100):
-            r = self.np_random.integers(0, self.grid_size)
-            c = self.np_random.integers(0, self.grid_size)
-            if (r, c) != (self.grid_size - 1, 0):
-                self.gold_pos = [r, c]
-                break
-
-        # Place Pits with 0.15 probability (slightly reduced for playability)
-        self.pits = []
-        for r in range(self.grid_size):
-            for c in range(self.grid_size):
-                if (r, c) in safe_cells:
+        self._reset_state()
+        
+        if self.difficulty == 0:
+            # Easiest: gold one step right
+            self.gold_pos = [3, 1]
+            self.wumpus_pos = None
+            self.wumpus_alive = False
+            self.pits = []
+        elif self.difficulty == 1:
+            # Random gold, no hazards
+            others = [(r,c) for r in range(4) for c in range(4) if (r,c) != (3,0)]
+            idx = self.np_random.integers(0, len(others))
+            self.gold_pos = list(others[idx])
+            self.wumpus_pos = None
+            self.wumpus_alive = False
+            self.pits = []
+        elif self.difficulty == 2:
+            # Random gold + wumpus, no pits
+            others = [(r,c) for r in range(4) for c in range(4) if (r,c) != (3,0)]
+            idx = self.np_random.integers(0, len(others))
+            self.gold_pos = list(others[idx])
+            remaining = [c for c in others if list(c) != self.gold_pos]
+            idx = self.np_random.integers(0, len(remaining))
+            self.wumpus_pos = list(remaining[idx])
+            self.wumpus_alive = True
+            self.pits = []
+        else:
+            # Full difficulty
+            others = [(r,c) for r in range(4) for c in range(4) if (r,c) != (3,0)]
+            idx = self.np_random.integers(0, len(others))
+            self.gold_pos = list(others[idx])
+            remaining = [c for c in others if list(c) != self.gold_pos]
+            idx = self.np_random.integers(0, len(remaining))
+            self.wumpus_pos = list(remaining[idx])
+            self.wumpus_alive = True
+            self.pits = []
+            for r, c in others:
+                if abs(3-r) + abs(0-c) <= 1:
                     continue
-                if [r, c] in self.wumpus_pos:
-                    continue
-                if [r, c] == self.gold_pos:
+                if [r,c] == self.gold_pos or [r,c] == self.wumpus_pos:
                     continue
                 if self.np_random.random() < 0.15:
                     self.pits.append([r, c])
+        
+        return self._obs(), {}
 
-        return self._get_obs(), {}
-
-    def _get_obs(self):
-        """Get the observation as a 4-channel grid."""
-        obs = np.zeros((4, self.grid_size, self.grid_size), dtype=np.float32)
-
-        # Channel 0: Player
-        obs[0, self.player_pos[0], self.player_pos[1]] = 1.0
-
-        # Channel 1: Pits
-        for p in self.pits:
-            obs[1, p[0], p[1]] = 1.0
-
-        # Channel 2: Wumpus
-        for w in self.wumpus_pos:
-            obs[2, w[0], w[1]] = 1.0
-
-        # Channel 3: Gold
-        if not self.has_gold and self.gold_pos:
-            obs[3, self.gold_pos[0], self.gold_pos[1]] = 1.0
-
+    def _obs(self):
+        r, c = self.agent_pos
+        
+        # Check for adjacent dangers
+        danger = 0
+        for ar, ac in self._adjacent(r, c):
+            if [ar, ac] in self.pits:
+                danger = 1
+            if self.wumpus_pos and [ar, ac] == self.wumpus_pos and self.wumpus_alive:
+                danger = 1
+        
+        # Glitter = gold here
+        glitter = 1 if (self.gold_pos and [r, c] == self.gold_pos and not self.has_gold) else 0
+        
+        # Can win = at start with gold
+        at_start = (r == 3 and c == 0)
+        can_win = 1 if (at_start and self.has_gold) else 0
+        
+        obs = np.array([
+            r / 3.0,
+            c / 3.0,
+            1.0 if self.has_gold else 0.0,
+            float(glitter),
+            float(can_win),
+            self.gold_pos[0] / 3.0 if self.gold_pos else r / 3.0,  # Gold row (or agent if picked)
+            self.gold_pos[1] / 3.0 if self.gold_pos else c / 3.0,  # Gold col
+            float(danger),
+        ], dtype=np.float32)
+        
         return obs
 
     def step(self, action):
         self.current_step += 1
-
-        row, col = self.player_pos
-        old_pos = tuple(self.player_pos)
-
-        # 0: Up, 1: Down, 2: Left, 3: Right
-        if action == 0:  # Up
-            row -= 1
-        elif action == 1:  # Down
-            row += 1
-        elif action == 2:  # Left
-            col -= 1
-        elif action == 3:  # Right
-            col += 1
-
-        # Check boundary
-        if row < 0 or row >= self.grid_size or col < 0 or col >= self.grid_size:
-            # Hit wall - stay in place, small penalty
-            reward = -5
-            terminated = False
-            truncated = False
-        else:
-            self.player_pos = [row, col]
-            reward = -1  # Move cost
-            terminated = False
-            truncated = False
-
-            # Exploration bonus for visiting new cells
-            if tuple(self.player_pos) not in self.visited:
-                reward += 2  # Small bonus for exploration
-                self.visited.add(tuple(self.player_pos))
-
-            # Check interactions
-            if [row, col] in self.wumpus_pos:
-                reward = -100  # Death by Wumpus
-                terminated = True
-                self.game_over = True
-            elif [row, col] in self.pits:
-                reward = -100  # Death by pit
-                terminated = True
-                self.game_over = True
-            elif self.gold_pos and [row, col] == self.gold_pos and not self.has_gold:
-                reward = 100  # Found gold!
+        reward = -1  # Step cost
+        terminated = False
+        truncated = False
+        
+        r, c = self.agent_pos
+        
+        if action in [self.UP, self.DOWN, self.LEFT, self.RIGHT]:
+            dr, dc = self.DIR_VECTORS[action]
+            nr, nc = r + dr, c + dc
+            
+            if 0 <= nr < 4 and 0 <= nc < 4:
+                self.agent_pos = [nr, nc]
+                
+                # Death check
+                if self.wumpus_pos and [nr, nc] == self.wumpus_pos and self.wumpus_alive:
+                    reward = -100
+                    terminated = True
+                    self.game_over = True
+                elif [nr, nc] in self.pits:
+                    reward = -100
+                    terminated = True
+                    self.game_over = True
+                else:
+                    # Distance shaping
+                    if self.gold_pos and not self.has_gold:
+                        old_dist = abs(r - self.gold_pos[0]) + abs(c - self.gold_pos[1])
+                        new_dist = abs(nr - self.gold_pos[0]) + abs(nc - self.gold_pos[1])
+                        reward += (old_dist - new_dist) * 2
+                    elif self.has_gold:
+                        old_dist = abs(r - 3) + abs(c - 0)
+                        new_dist = abs(nr - 3) + abs(nc - 0)
+                        reward += (old_dist - new_dist) * 5
+            else:
+                reward -= 2  # Bump
+        
+        elif action == self.GRAB:
+            if self.gold_pos and self.agent_pos == self.gold_pos and not self.has_gold:
                 self.has_gold = True
-                self.win = True
                 self.gold_pos = None
-                terminated = True  # Game ends when gold is found
-
+                reward = 20
+        
+        elif action == self.CLIMB:
+            if self.agent_pos == [3, 0]:
+                if self.has_gold:
+                    reward = 100
+                    self.win = True
+                else:
+                    reward = -20
+                terminated = True
+                self.game_over = True
+        
         if self.current_step >= self.max_steps:
             truncated = True
-
-        # Auto-render in human mode
+            reward -= 10
+        
         if self.render_mode == "human":
             self.render()
-
-        return self._get_obs(), reward, terminated, truncated, {
-            "has_gold": self.has_gold,
-            "game_over": self.game_over,
-            "win": self.win
-        }
+        
+        return self._obs(), reward, terminated, truncated, {"win": self.win, "has_gold": self.has_gold}
 
     def render(self):
-        """Render the environment."""
         if self.render_mode == "ansi":
             return self._render_ansi()
         elif self.render_mode in ["human", "rgb_array"]:
-            return self._render_pygame()
-        return None
+            return self._render_visual()
 
     def _render_ansi(self):
-        """Text-based rendering."""
-        grid_str = "\n" + "=" * (self.grid_size * 2 + 1) + "\n"
-        for r in range(self.grid_size):
-            line = "|"
-            for c in range(self.grid_size):
-                cell_str = "."
-
-                # Check static objects
-                if [r, c] in self.pits:
-                    cell_str = "P"
-                if [r, c] in self.wumpus_pos:
-                    cell_str = "W"
-                if self.gold_pos and [r, c] == self.gold_pos and not self.has_gold:
-                    cell_str = "G"
-
-                # Player overrides
-                if [r, c] == self.player_pos:
-                    if cell_str == "G":
-                        cell_str = "+"  # Player on Gold
-                    elif cell_str == "P":
-                        cell_str = "@"  # Player in Pit (dead)
-                    elif cell_str == "W":
-                        cell_str = "X"  # Player on Wumpus (dead)
-                    else:
-                        cell_str = "A"  # Agent
-
-                line += cell_str + "|"
-            grid_str += line + "\n"
-        grid_str += "=" * (self.grid_size * 2 + 1)
-        print(grid_str)
-        return grid_str
-
-    def _render_pygame(self):
-        """Visual rendering using pygame."""
-        import pygame
+        lines = [f"\nStep {self.current_step} | Gold:{'✓' if self.has_gold else '○'}"]
+        lines.append("+" + "---+" * 4)
         
-        if self.window is None:
-            pygame.init()
-            pygame.display.init()
-            self.window = pygame.display.set_mode(
-                (self.grid_size * self.cell_size, self.grid_size * self.cell_size + 60)
-            )
-            pygame.display.set_caption("Wumpus World")
-            self.clock = pygame.time.Clock()
-            self._load_images()
-
-        # Create surface
-        canvas = pygame.Surface(
-            (self.grid_size * self.cell_size, self.grid_size * self.cell_size + 60)
-        )
-        canvas.fill((40, 40, 40))  # Dark background
-
-        # Draw grid
-        for r in range(self.grid_size):
-            for c in range(self.grid_size):
-                x = c * self.cell_size
-                y = r * self.cell_size
-
-                # Draw empty cell background
-                canvas.blit(self.images['empty'], (x, y))
-
-                # Draw breeze indicator (semi-transparent overlay)
-                if self._has_breeze(r, c):
-                    breeze_img = self.images['breeze'].copy()
-                    breeze_img.set_alpha(150)
-                    canvas.blit(breeze_img, (x, y))
-
-                # Draw stench indicator (semi-transparent overlay)
-                if self._has_stench(r, c):
-                    stench_img = self.images['stench'].copy()
-                    stench_img.set_alpha(150)
-                    canvas.blit(stench_img, (x, y))
-
-                # Draw pit
-                if [r, c] in self.pits:
-                    canvas.blit(self.images['pit'], (x, y))
-
-                # Draw wumpus
-                if [r, c] in self.wumpus_pos:
-                    canvas.blit(self.images['wumpus'], (x, y))
-
-                # Draw gold
-                if self.gold_pos and [r, c] == self.gold_pos and not self.has_gold:
-                    canvas.blit(self.images['gold'], (x, y))
-
-                # Draw player
-                if [r, c] == self.player_pos:
-                    canvas.blit(self.images['agent'], (x, y))
-
-                # Draw grid lines
-                pygame.draw.rect(canvas, (80, 80, 80), 
-                               (x, y, self.cell_size, self.cell_size), 2)
-
-        # Draw status bar
-        font = pygame.font.Font(None, 28)
-        status_y = self.grid_size * self.cell_size + 10
+        for r in range(4):
+            row = "|"
+            for c in range(4):
+                ch = []
+                if [r,c] == self.agent_pos:
+                    ch.append('A')
+                if self.wumpus_pos and [r,c] == self.wumpus_pos:
+                    ch.append('W' if self.wumpus_alive else 'w')
+                if self.gold_pos and [r,c] == self.gold_pos:
+                    ch.append('G')
+                if [r,c] in self.pits:
+                    ch.append('P')
+                cell = ''.join(ch[:3]).center(3) if ch else ' . '
+                row += cell + "|"
+            lines.append(row)
+            lines.append("+" + "---+" * 4)
         
-        # Step counter
-        step_text = font.render(f"Step: {self.current_step}/{self.max_steps}", True, (200, 200, 200))
-        canvas.blit(step_text, (10, status_y))
-        
-        # Gold status
-        gold_color = (255, 215, 0) if self.has_gold else (150, 150, 150)
-        gold_text = font.render(f"Gold: {'✓' if self.has_gold else '○'}", True, gold_color)
-        canvas.blit(gold_text, (200, status_y))
-        
-        # Game status
-        if self.game_over and not self.win:
-            status_text = font.render("GAME OVER!", True, (255, 50, 50))
-            canvas.blit(status_text, (350, status_y))
-        elif self.win:
-            status_text = font.render("VICTORY!", True, (50, 255, 50))
-            canvas.blit(status_text, (350, status_y))
+        out = '\n'.join(lines)
+        print(out)
+        return out
 
-        if self.render_mode == "human":
-            self.window.blit(canvas, canvas.get_rect())
-            pygame.event.pump()
-            pygame.display.update()
-            self.clock.tick(self.metadata["render_fps"])
+    def _render_visual(self):
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
         
-        # Return RGB array
-        return np.transpose(
-            np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
-        )
+        fig, ax = plt.subplots(figsize=(5, 5.5))
+        ax.set_xlim(0, 4)
+        ax.set_ylim(0, 5)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_facecolor('#1a1a2e')
+        fig.patch.set_facecolor('#1a1a2e')
+        
+        colors = {
+            'cell': '#1f4068', 'agent': '#4ecca3', 'gold': '#ffd700',
+            'wumpus': '#e94560', 'pit': '#0f0f0f', 'start': '#2a9d8f',
+        }
+        
+        for r in range(4):
+            for c in range(4):
+                y = 3 - r
+                color = colors['start'] if (r,c) == (3,0) else colors['cell']
+                rect = patches.Rectangle((c, y), 1, 1, facecolor=color, edgecolor='#333', lw=2)
+                ax.add_patch(rect)
+                
+                if [r,c] in self.pits:
+                    ax.add_patch(patches.Circle((c+0.5, y+0.5), 0.3, facecolor=colors['pit']))
+                    ax.text(c+0.5, y+0.5, 'P', ha='center', va='center', fontsize=12, color='#666')
+                
+                if self.wumpus_pos and [r,c] == self.wumpus_pos:
+                    wc = colors['wumpus'] if self.wumpus_alive else '#553344'
+                    ax.text(c+0.5, y+0.5, 'W', ha='center', va='center', fontsize=18, color=wc, weight='bold')
+                
+                if self.gold_pos and [r,c] == self.gold_pos:
+                    ax.text(c+0.5, y+0.5, '★', ha='center', va='center', fontsize=20, color=colors['gold'])
+                
+                if [r,c] == self.agent_pos:
+                    ax.add_patch(patches.Circle((c+0.5, y+0.5), 0.3, facecolor=colors['agent'], edgecolor='white', lw=2))
+        
+        status = f"Step:{self.current_step} Gold:{'✓' if self.has_gold else '○'}"
+        ax.text(0, 4.3, status, fontsize=10, color='#aaa')
+        
+        if self.win:
+            ax.text(2, 4.6, "WIN!", fontsize=16, ha='center', color=colors['gold'], weight='bold')
+        elif self.game_over:
+            ax.text(2, 4.6, "DEAD", fontsize=16, ha='center', color=colors['wumpus'], weight='bold')
+        
+        fig.canvas.draw()
+        img = np.array(fig.canvas.renderer.buffer_rgba())[:,:,:3]
+        plt.close(fig)
+        return img
 
     def close(self):
-        """Clean up pygame resources."""
-        if self.window is not None:
-            import pygame
-            pygame.display.quit()
-            pygame.quit()
-            self.window = None
-            self.clock = None
+        pass
