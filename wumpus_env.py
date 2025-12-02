@@ -38,13 +38,14 @@ class WumpusWorldEnv(gym.Env):
         
         self.action_space = spaces.Discrete(5)  # Up, Down, Left, Right, Climb
         
-        # Observation: 18 floats - NO gold location (must explore!)
-        # [row, col, has_gold, glitter, glitter_adjacent, can_win,
+        # Observation: 14 floats
+        # [row, col, has_gold, can_win,
         #  danger_up, danger_down, danger_left, danger_right,
-        #  wall_up, wall_down, wall_left, wall_right,
+        #  glitter_up, glitter_down, glitter_left, glitter_right,
         #  unvisited_up, unvisited_down, unvisited_left, unvisited_right]
+        # Note: walls can be inferred from position (row=0 → wall up, col=3 → wall right, etc.)
         self.observation_space = spaces.Box(
-            low=0, high=1, shape=(18,), dtype=np.float32
+            low=0, high=1, shape=(16,), dtype=np.float32
         )
         
         self._reset_state()
@@ -121,10 +122,14 @@ class WumpusWorldEnv(gym.Env):
     def _obs(self):
         r, c = self.agent_pos
         
-        # Check for danger in each direction
+        # Helper to check if cell is valid
+        def in_bounds(nr, nc):
+            return 0 <= nr < 4 and 0 <= nc < 4
+        
+        # Check for danger in each direction (pit or wumpus)
         def is_danger(nr, nc):
-            if not (0 <= nr < 4 and 0 <= nc < 4):
-                return 0  # Wall, not danger
+            if not in_bounds(nr, nc):
+                return 0
             if [nr, nc] in self.pits:
                 return 1
             if self.wumpus_pos and [nr, nc] == self.wumpus_pos and self.wumpus_alive:
@@ -136,33 +141,29 @@ class WumpusWorldEnv(gym.Env):
         danger_left = is_danger(r, c - 1)
         danger_right = is_danger(r, c + 1)
         
-        # Wall detection (boundaries)
-        wall_up = 1 if r == 0 else 0
-        wall_down = 1 if r == 3 else 0
-        wall_left = 1 if c == 0 else 0
-        wall_right = 1 if c == 3 else 0
+        # Glitter in each direction (gold is adjacent - tells you WHERE!)
+        def is_glitter(nr, nc):
+            if not in_bounds(nr, nc):
+                return 0
+            if self.gold_pos and [nr, nc] == self.gold_pos and not self.has_gold:
+                return 1
+            return 0
+        
+        glitter_up = is_glitter(r - 1, c)
+        glitter_down = is_glitter(r + 1, c)
+        glitter_left = is_glitter(r, c - 1)
+        glitter_right = is_glitter(r, c + 1)
         
         # Unvisited cell detection - helps agent explore systematically
         def is_unvisited(nr, nc):
-            if not (0 <= nr < 4 and 0 <= nc < 4):
-                return 0  # Wall
+            if not in_bounds(nr, nc):
+                return 0
             return 0 if (nr, nc) in self.visited else 1
         
         unvisited_up = is_unvisited(r - 1, c)
         unvisited_down = is_unvisited(r + 1, c)
         unvisited_left = is_unvisited(r, c - 1)
         unvisited_right = is_unvisited(r, c + 1)
-        
-        # Glitter = gold is HERE
-        glitter = 1 if (self.gold_pos and [r, c] == self.gold_pos) else 0
-        
-        # Glitter adjacent = gold is in an adjacent cell (hint!)
-        glitter_adjacent = 0
-        if self.gold_pos and not self.has_gold:
-            for ar, ac in self._adjacent(r, c):
-                if [ar, ac] == self.gold_pos:
-                    glitter_adjacent = 1
-                    break
         
         # Can win = at start with gold
         at_start = (r == 3 and c == 0)
@@ -172,17 +173,15 @@ class WumpusWorldEnv(gym.Env):
             r / 3.0,
             c / 3.0,
             1.0 if self.has_gold else 0.0,
-            float(glitter),
-            float(glitter_adjacent),
             float(can_win),
             float(danger_up),
             float(danger_down),
             float(danger_left),
             float(danger_right),
-            float(wall_up),
-            float(wall_down),
-            float(wall_left),
-            float(wall_right),
+            float(glitter_up),
+            float(glitter_down),
+            float(glitter_left),
+            float(glitter_right),
             float(unvisited_up),
             float(unvisited_down),
             float(unvisited_left),
@@ -281,9 +280,47 @@ class WumpusWorldEnv(gym.Env):
             lines.append(row)
             lines.append("+" + "---+" * 4)
         
+        # Show percepts
+        percepts = self._get_percepts()
+        if percepts:
+            lines.append("Percepts: " + " | ".join(percepts))
+        
         out = '\n'.join(lines)
         print(out)
         return out
+
+    def _get_percepts(self):
+        """Get current percepts for display."""
+        r, c = self.agent_pos
+        percepts = []
+        
+        # Check for danger in each direction
+        directions = [('^', r-1, c), ('v', r+1, c), ('<', r, c-1), ('>', r, c+1)]
+        
+        danger_dirs = []
+        glitter_dirs = []
+        
+        for arrow, nr, nc in directions:
+            if 0 <= nr < 4 and 0 <= nc < 4:
+                # Danger (stench/breeze)
+                if [nr, nc] in self.pits:
+                    danger_dirs.append(arrow)
+                if self.wumpus_pos and [nr, nc] == self.wumpus_pos and self.wumpus_alive:
+                    danger_dirs.append(arrow)
+                # Glitter
+                if self.gold_pos and [nr, nc] == self.gold_pos and not self.has_gold:
+                    glitter_dirs.append(arrow)
+        
+        if danger_dirs:
+            percepts.append(f"DANGER {' '.join(danger_dirs)}")
+        if glitter_dirs:
+            percepts.append(f"GLITTER {' '.join(glitter_dirs)}")
+        if self.has_gold:
+            percepts.append("GOT GOLD")
+        if r == 3 and c == 0 and self.has_gold:
+            percepts.append("CAN WIN")
+            
+        return percepts
 
     def _render_visual(self):
         import matplotlib
@@ -291,9 +328,9 @@ class WumpusWorldEnv(gym.Env):
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
         
-        fig, ax = plt.subplots(figsize=(5, 5.5))
+        fig, ax = plt.subplots(figsize=(5, 6))
         ax.set_xlim(0, 4)
-        ax.set_ylim(0, 5)
+        ax.set_ylim(-0.8, 5)
         ax.set_aspect('equal')
         ax.axis('off')
         ax.set_facecolor('#1a1a2e')
@@ -325,13 +362,22 @@ class WumpusWorldEnv(gym.Env):
                 if [r,c] == self.agent_pos:
                     ax.add_patch(patches.Circle((c+0.5, y+0.5), 0.3, facecolor=colors['agent'], edgecolor='white', lw=2))
         
+        # Status line
         status = f"Step:{self.current_step} Gold:{'✓' if self.has_gold else '○'}"
         ax.text(0, 4.3, status, fontsize=10, color='#aaa')
         
+        # Win/Dead message
         if self.win:
             ax.text(2, 4.6, "WIN!", fontsize=16, ha='center', color=colors['gold'], weight='bold')
         elif self.game_over:
             ax.text(2, 4.6, "DEAD", fontsize=16, ha='center', color=colors['wumpus'], weight='bold')
+        
+        # Percepts display
+        percepts = self._get_percepts()
+        if percepts:
+            percept_text = "  |  ".join(percepts)
+            ax.text(2, -0.4, percept_text, fontsize=9, ha='center', color='#ddd', 
+                   bbox=dict(boxstyle='round', facecolor='#2d2d44', edgecolor='#444', pad=0.3))
         
         fig.canvas.draw()
         img = np.array(fig.canvas.renderer.buffer_rgba())[:,:,:3]
