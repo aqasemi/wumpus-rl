@@ -22,9 +22,9 @@ class WumpusWorldEnv(gym.Env):
         # Channel 3: Gold position
         self.observation_space = spaces.Box(low=0, high=1, shape=(4, 5, 5), dtype=np.float32)
 
-        self.player_pos = None
-        self.wumpus_pos = None
-        self.gold_pos = None
+        self.player_pos: list[float] = []
+        self.wumpus_pos: list[list[float]] = []
+        self.gold_pos: list[float] = []
         self.pits = []
         self.has_gold = False
 
@@ -45,13 +45,16 @@ class WumpusWorldEnv(gym.Env):
         # Adjacent to (4,0) are (3,0) and (4,1)
         safe_cells = {(self.grid_size - 1, 0), (self.grid_size - 2, 0), (self.grid_size - 1, 1)}
 
-        # Place Wumpus (1 Wumpus)
-        while True:
-            r = self.np_random.integers(0, self.grid_size)
-            c = self.np_random.integers(0, self.grid_size)
-            if (r, c) not in safe_cells:
-                self.wumpus_pos = [r, c]
-                break
+        # Place Wumpus (1 or 2 Wumpus)
+        num_wumpus = self.np_random.integers(1, 3)  # 1 or 2 Wumpus
+        self.wumpus_pos = []
+        for _ in range(num_wumpus):
+            while True:
+                r = self.np_random.integers(0, self.grid_size)
+                c = self.np_random.integers(0, self.grid_size)
+                if (r, c) not in safe_cells and (r, c) not in self.wumpus_pos:
+                    self.wumpus_pos.append([r, c])
+                    break
 
         # Place Gold (1 Gold)
         while True:
@@ -70,7 +73,7 @@ class WumpusWorldEnv(gym.Env):
             for c in range(self.grid_size):
                 if (r, c) in safe_cells:
                     continue
-                if [r, c] == self.wumpus_pos: # Avoid placing pit on wumpus? Wumpus falls in pit? Let's keep distinct.
+                if [r, c] in self.wumpus_pos: # Avoid placing pit on wumpus? Wumpus falls in pit? Let's keep distinct.
                     continue
                 if [r, c] == self.gold_pos: # Pit on gold? Usually no.
                     continue
@@ -91,8 +94,9 @@ class WumpusWorldEnv(gym.Env):
             obs[1, p[0], p[1]] = 1.0
 
         # Channel 2: Wumpus
-        obs[2, self.wumpus_pos[0], self.wumpus_pos[1]] = 1.0
-
+        for w in self.wumpus_pos:
+            obs[2, w[0], w[1]] = 1.0
+    
         # Channel 3: Gold
         if not self.has_gold and self.gold_pos:
             obs[3, self.gold_pos[0], self.gold_pos[1]] = 1.0
@@ -128,7 +132,7 @@ class WumpusWorldEnv(gym.Env):
             truncated = False
 
             # Check interactions
-            if [row, col] == self.wumpus_pos:
+            if [row, col] in self.wumpus_pos:
                 reward += -1000
                 terminated = True
             elif [row, col] in self.pits:
@@ -157,7 +161,7 @@ class WumpusWorldEnv(gym.Env):
                 # Check static objects first
                 if [r, c] in self.pits:
                     cell_str = "P"
-                if [r, c] == self.wumpus_pos:
+                if [r, c] in self.wumpus_pos:
                     cell_str = "W"
                 if [r, c] == self.gold_pos and not self.has_gold:
                     cell_str = "G"
